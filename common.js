@@ -24,7 +24,7 @@ let passportsMap = null;
 async function loadPassports() {
     if (passportsMap) return passportsMap;
     try {
-        const response = await fetch('/passports.csv');
+        const response = await fetch('passports.csv');
         if (!response.ok) throw new Error('CSV not found');
         const text = await response.text();
         const lines = text.split('\n').filter(l => l.trim());
