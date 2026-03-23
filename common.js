@@ -1,32 +1,18 @@
 // common.js — общий код для Kindnology портала
-
-// ------------------- Web3 / MetaMask -------------------
 let currentLang = 'en';
-
-async function connectWallet() {
-    if (typeof window.ethereum !== 'undefined') {
-        try {
-            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-            return accounts[0];
-        } catch (error) {
-            console.error('User denied account access');
-            return null;
-        }
-    } else {
-        alert('MetaMask is not installed. Please install it to interact with the Garden.');
-        return null;
-    }
-}
+let passportsMap = null;
+let currentProfit = null;
 
 // ------------------- Загрузка passports.csv -------------------
-let passportsMap = null;
-
 async function loadPassports() {
     if (passportsMap) return passportsMap;
     try {
+        console.log("🔍 Загружаю passports.csv...");
         const response = await fetch('passports.csv');
-        if (!response.ok) throw new Error('CSV not found');
+        console.log("📡 Статус ответа:", response.status);
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         const text = await response.text();
+        console.log("📄 Текст CSV (первые 200 символов):", text.slice(0,200));
         const lines = text.split('\n').filter(l => l.trim());
         const map = new Map();
         let totalProfitSum = 0;
@@ -43,7 +29,7 @@ async function loadPassports() {
                 }
             }
         }
-        // если есть элементы статистики на странице — обновляем их
+        console.log(`✅ Загружено операторов: ${uniqueCount}, суммарный опыт: ${totalProfitSum.toFixed(0)} ETH`);
         if (document.getElementById('invitedCount')) {
             document.getElementById('invitedCount').innerText = uniqueCount.toLocaleString();
             document.getElementById('totalExperience').innerText = totalProfitSum.toFixed(0).toLocaleString();
@@ -51,7 +37,10 @@ async function loadPassports() {
         passportsMap = map;
         return map;
     } catch (err) {
-        console.warn('Could not load passports.csv', err);
+        console.error("❌ Ошибка загрузки passports.csv:", err);
+        if (document.getElementById('passportsStatus')) {
+            document.getElementById('passportsStatus').innerHTML = '⚠️ Could not load passports.csv';
+        }
         return null;
     }
 }
@@ -61,6 +50,30 @@ async function getProfit(address) {
     if (!map) return null;
     const addr = address.toLowerCase();
     return map.get(addr) || null;
+}
+
+// ------------------- Обновление формы по адресу -------------------
+async function updateFromAddress(address) {
+    const addr = address.trim().toLowerCase();
+    if (!addr || !addr.startsWith('0x')) {
+        if (document.getElementById('taxContainer')) document.getElementById('taxContainer').style.display = 'none';
+        if (document.getElementById('profitInput')) document.getElementById('profitInput').value = '';
+        currentProfit = null;
+        return;
+    }
+    const profit = await getProfit(addr);
+    if (profit !== undefined && profit !== null) {
+        currentProfit = profit;
+        if (document.getElementById('profitInput')) document.getElementById('profitInput').value = profit.toFixed(4);
+        if (document.getElementById('displayProfit')) document.getElementById('displayProfit').innerText = profit.toFixed(4) + ' ETH';
+        const tax = profit * 0.15;
+        if (document.getElementById('taxAmount')) document.getElementById('taxAmount').innerText = tax.toFixed(4) + ' ETH';
+        if (document.getElementById('taxContainer')) document.getElementById('taxContainer').style.display = 'block';
+    } else {
+        if (document.getElementById('profitInput')) document.getElementById('profitInput').value = 'Not found in passports';
+        if (document.getElementById('taxContainer')) document.getElementById('taxContainer').style.display = 'none';
+        currentProfit = null;
+    }
 }
 
 // ------------------- Языковой переключатель -------------------
@@ -82,7 +95,6 @@ function setLanguage(lang) {
         const attr = opt.getAttribute('data-' + lang);
         if (attr !== null) opt.innerText = attr;
     });
-    // обновляем подсказки на карточках
     const cardIds = ['card1', 'card2', 'card3'];
     cardIds.forEach(id => {
         const card = document.getElementById(id);
@@ -91,22 +103,86 @@ function setLanguage(lang) {
             if (titleAttr) card.setAttribute('title', titleAttr);
         }
     });
-    // активная кнопка
     document.querySelectorAll('.lang-btn').forEach(btn => {
         if (btn.getAttribute('data-lang') === lang) btn.classList.add('active');
         else btn.classList.remove('active');
     });
 }
 
-// ------------------- I See You (заглушка для отправки токена) -------------------
-async function sendISeeYou(address) {
-    // В будущем здесь будет вызов смарт-контракта для отправки SBT или транзакции с данными
-    console.log(`Sending I See You to ${address}`);
-    alert(`✨ I See You token sent to ${address.slice(0,6)}...${address.slice(-4)}! Welcome to the Garden.`);
-    // Здесь можно добавить реальную отправку через ethers.js
+// ------------------- Web3 / MetaMask (заглушка) -------------------
+let provider, signer, kindContract, gardenContract;
+const KIND_ADDRESS = "0xcd9CCd6C9DA89bE6f0CaCec4a5041eC0406C63F4";
+const GARDEN_ADDRESS = "0x5b7AaFAEC25e23b27B02FD3D74C417Ed9C519452";
+const KIND_ABI = [
+    "function balanceOf(address owner) view returns (uint256)",
+    "function approve(address spender, uint256 value) returns (bool)",
+    "function transferFrom(address from, address to, uint256 value) returns (bool)",
+    "function transfer(address to, uint256 value) returns (bool)"
+];
+const GARDEN_ABI = [
+    "function depositETH() external payable",
+    "function subscribe(uint256 months) external",
+    "function mintWillkomm() external",
+    "function exchangeRate() view returns (uint256)",
+    "function subscriptionPrice() view returns (uint256)",
+    "function kindToken() view returns (address)"
+];
+
+async function connectWallet() {
+    if (typeof window.ethereum !== 'undefined') {
+        try {
+            await window.ethereum.request({ method: 'eth_requestAccounts' });
+            provider = new ethers.providers.Web3Provider(window.ethereum);
+            signer = provider.getSigner();
+            kindContract = new ethers.Contract(KIND_ADDRESS, KIND_ABI, signer);
+            gardenContract = new ethers.Contract(GARDEN_ADDRESS, GARDEN_ABI, signer);
+            return await signer.getAddress();
+        } catch (error) {
+            console.error(error);
+            return null;
+        }
+    } else {
+        alert('MetaMask not installed.');
+        return null;
+    }
 }
 
-// ------------------- Экспорт для использования в других скриптах (если нужно) -------------------
+async function startJourney(address, profit, contribution, subscription, path, reason) {
+    if (!signer) {
+        const addr = await connectWallet();
+        if (!addr) {
+            alert('Please connect MetaMask.');
+            return false;
+        }
+        if (addr.toLowerCase() !== address.toLowerCase()) {
+            alert('Please use the same wallet as the address entered.');
+            return false;
+        }
+    }
+    try {
+        const exchangeRate = await gardenContract.exchangeRate();
+        const subscriptionKind = 10;
+        const ethNeeded = contribution + (subscriptionKind * (1 / (exchangeRate / 1e18)));
+        const ethWei = ethers.utils.parseEther(ethNeeded.toFixed(18));
+        const tx1 = await gardenContract.depositETH({ value: ethWei });
+        await tx1.wait();
+        const kindAmount = ethers.utils.parseUnits('10', 18);
+        const approveTx = await kindContract.approve(GARDEN_ADDRESS, kindAmount);
+        await approveTx.wait();
+        const subscribeTx = await gardenContract.subscribe(1);
+        await subscribeTx.wait();
+        const mintTx = await gardenContract.mintWillkomm();
+        await mintTx.wait();
+        alert('🎉 You are now a gardener! Welcome to the Kindnology Garden.');
+        return true;
+    } catch (err) {
+        console.error(err);
+        alert('Transaction failed: ' + (err.message || err));
+        return false;
+    }
+}
+
+// ------------------- Экспорт для использования в других скриптах (необязательно) -------------------
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { connectWallet, loadPassports, getProfit, setLanguage, sendISeeYou };
+    module.exports = { connectWallet, loadPassports, getProfit, setLanguage, startJourney, updateFromAddress };
 }
